@@ -1,0 +1,40 @@
+#!perl
+use Cassandane::Tiny;
+
+# ASCII collection names in /dav/drive keep their href, displayname and
+# mailbox name.
+
+sub test_dav_drive_ascii_names
+    :NoStartInstances
+    ($self)
+{
+    $self->config_set(httpmodules => 'carddav caldav webdav');
+    $self->_start_instances();
+
+    my $service = $self->{instance}->get_service("http");
+    my $talk = Net::DAVTalk->new(
+        user => 'cassandane',
+        password => 'pass',
+        host => $service->host(),
+        port => $service->port(),
+        scheme => 'http',
+        url => '/',
+    );
+
+    my $base = '/dav/drive/user/cassandane';
+    my $res = $talk->SafeRequest('MKCOL', "$base/Meetings/", '');
+    $self->assert_equals(201, $res->{http_response}{status});
+    $res = $talk->SafeRequest('PUT', "$base/Meetings/a.txt", 'x',
+                              'Content-Type' => 'text/plain');
+    $self->assert_equals(201, $res->{http_response}{status});
+
+    $res = $talk->SafeRequest('PROPFIND', "$base/", '', 'Depth' => 1);
+    $self->assert_equals(207, $res->{http_response}{status});
+    my $xml = $res->{http_response}{content};
+    $self->assert_matches(qr{<D:href>\Q$base\E/Meetings/</D:href>}, $xml);
+    $self->assert_matches(qr{displayname[^>]*>(?:<!\[CDATA\[)?Meetings}, $xml);
+
+    my $admintalk = $self->{adminstore}->get_client();
+    my $list = join ' ', map { $_->[2] } @{ $admintalk->list('', '*') || [] };
+    $self->assert_matches(qr{\bMeetings\b}, $list);
+}

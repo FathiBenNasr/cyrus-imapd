@@ -1,0 +1,30 @@
+Description:
+
+In the WebDAV drive namespace (/dav/drive), collection names are now UTF-8
+in the URL and are converted to and from the modified UTF-7 of the mailbox
+name.  Previously, MKCOL of a name with a non-ASCII character or an
+ampersand failed with 500 "Invalid mailbox name", and a client that sent
+modified UTF-7 itself got UTF-7 back in PROPFIND hrefs and an empty
+displayname.  Invalid UTF-8 is refused with 400.  A segment that is already
+valid modified UTF-7 and contains an ampersand is still taken as it is.
+CalDAV and CardDAV are not affected.
+
+
+Documentation:
+
+None
+
+
+Config changes:
+
+None
+
+
+Upgrade instructions:
+
+None
+
+
+GitHub issue:
+
+None

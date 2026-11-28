@@ -584,6 +584,12 @@ struct mime_type_t *get_accept_type(const char **hdr, struct mime_type_t *types)
 int parse_xml_body(struct transaction_t *txn, xmlNodePtr *root,
                    const char *mimetype);
 
+/* DAV drive collection names: URL segments are UTF-8, mailbox names are
+ * modified UTF-7.  Both return a malloc'd string (NULL if the segment is not
+ * valid UTF-8). */
+char *dav_drive_box_from_url(const char *segment);
+char *dav_drive_box_to_url(const char *box);
+
 size_t make_collection_url(struct buf *buf, const char *urlprefix, int haszzzz,
                            const mbname_t *mbname, const char *userid);
 

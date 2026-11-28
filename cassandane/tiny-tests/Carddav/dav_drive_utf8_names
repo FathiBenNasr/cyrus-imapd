@@ -1,0 +1,116 @@
+#!perl
+use Cassandane::Tiny;
+use utf8;
+use Encode qw(encode);
+
+# In /dav/drive, a collection name is UTF-8 in the URL and modified UTF-7 in
+# the mailbox name.  MKCOL of a non-ASCII name used to fail with 500 "Invalid
+# mailbox name", and a client sending modified UTF-7 itself got UTF-7 back.
+
+sub pe
+{
+    my ($s) = @_;
+    return join '', map { /[A-Za-z0-9._~-]/ ? $_ : sprintf('%%%02X', ord($_)) }
+                    split //, encode('UTF-8', $s);
+}
+
+sub test_dav_drive_utf8_names
+    :NoStartInstances
+    ($self)
+{
+    $self->config_set(httpmodules => 'carddav caldav webdav');
+    $self->_start_instances();
+
+    my $service = $self->{instance}->get_service("http");
+    my $talk = Net::DAVTalk->new(
+        user => 'cassandane',
+        password => 'pass',
+        host => $service->host(),
+        port => $service->port(),
+        scheme => 'http',
+        url => '/',
+    );
+    # Net::DAVTalk would percent-encode the href a second time: send it as is
+    my $req = sub {
+        my ($method, $href, $body, %headers) = @_;
+        my $res = $talk->ua->request($method,
+            'http://' . $service->host() . ':' . $service->port() . $href,
+            { headers => { Authorization => $talk->auth_header, %headers },
+              (defined $body && length $body ? (content => $body) : ()) });
+        return ($res->{status}, $res->{content});
+    };
+
+    my $base = '/dav/drive/user/cassandane';
+    my @names = ("Réunions", "عقود", "A&B", "With space", "v1.2");
+
+    xlog $self, "Create a collection, a sub-collection and files for each name";
+    foreach my $n (@names) {
+        my $col = "$base/" . pe($n) . '/';
+        my ($status) = $req->('MKCOL', $col);
+        $self->assert_equals(201, $status, "MKCOL $n: $status");
+        ($status) = $req->('MKCOL', $col . pe("Sub $n") . '/');
+        $self->assert_equals(201, $status, "MKCOL sub-collection of $n: $status");
+        ($status) = $req->('PUT', $col . 'a.txt', 'hello',
+                           'Content-Type' => 'text/plain');
+        $self->assert_equals(201, $status, "PUT in $n: $status");
+        ($status) = $req->('PUT', $col . pe("été.txt"), 'été',
+                           'Content-Type' => 'text/plain');
+        $self->assert_equals(201, $status, "PUT of an accented file in $n: $status");
+        my $content;
+        ($status, $content) = $req->('GET', $col . 'a.txt');
+        $self->assert_equals(200, $status);
+        $self->assert_str_equals('hello', $content);
+    }
+
+    xlog $self, "PROPFIND: UTF-8 percent-encoded hrefs and readable displaynames";
+    my ($status, $xml) = $req->('PROPFIND', "$base/", '', 'Depth' => 1);
+    $self->assert_equals(207, $status);
+    foreach my $n (@names) {
+        my $href = "$base/" . pe($n) . '/';
+        $self->assert_matches(qr{<D:href>\Q$href\E</D:href>}, $xml);
+        my $name = encode('UTF-8', $n);
+        $self->assert_matches(
+            qr{displayname[^>]*>(?:<!\[CDATA\[)?\Q$name\E}, $xml);
+    }
+    $self->assert_does_not_match(qr{%26A}, $xml);
+
+    xlog $self, "A modified UTF-7 segment, as clients had to send, still works";
+    my $content;
+    ($status, $content) = $req->('GET', "$base/R%26AOk-unions/a.txt");
+    $self->assert_equals(200, $status);
+    $self->assert_str_equals('hello', $content);
+    ($status) = $req->('MKCOL', "$base/Old%26AOk-/");
+    $self->assert_equals(201, $status);
+    ($status) = $req->('PROPFIND', "$base/" . pe("Oldé") . '/', '', 'Depth' => 0);
+    $self->assert_equals(207, $status);
+
+    xlog $self, "The IMAP mailbox exists, and IMAP shows it decoded";
+    my $admintalk = $self->{adminstore}->get_client();
+    my $list = join ' ', map { $_->[2] } @{ $admintalk->list('', '*') || [] };
+    $self->assert_matches(qr{#drive\.Réunions\b}, $list);
+
+    xlog $self, "Invalid UTF-8 is refused, not a server error";
+    ($status) = $req->('MKCOL', "$base/%FF%FE/");
+    $self->assert($status >= 400 && $status < 500, "invalid UTF-8: $status");
+
+    xlog $self, "MOVE to a non-ASCII name";
+    ($status) = $req->('PUT', "$base/" . pe("Oldé") . '/b.txt', 'b',
+                       'Content-Type' => 'text/plain');
+    $self->assert_equals(201, $status);
+    ($status) = $req->('MOVE', "$base/" . pe("Oldé") . '/', '',
+        'Destination' => "http://" . $service->host() . ':' . $service->port()
+                         . "$base/" . pe("Déplacé 2026") . '/');
+    $self->assert_equals(201, $status, "MOVE: $status");
+    ($status) = $req->('GET', "$base/" . pe("Déplacé 2026") . '/b.txt');
+    $self->assert_equals(200, $status);
+    ($status) = $req->('GET', "$base/" . pe("Oldé") . '/b.txt');
+    $self->assert_equals(404, $status);
+
+    xlog $self, "DELETE";
+    foreach my $n (@names, "Déplacé 2026") {
+        ($status) = $req->('DELETE', "$base/" . pe($n) . '/');
+        $self->assert($status == 204 || $status == 207, "DELETE $n: $status");
+        ($status) = $req->('GET', "$base/" . pe($n) . '/a.txt');
+        $self->assert_equals(404, $status, "$n survived its DELETE");
+    }
+}

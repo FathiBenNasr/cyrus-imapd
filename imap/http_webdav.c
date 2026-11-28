@@ -469,20 +469,28 @@ static int webdav_parse_path(const char *path, struct request_target_t *tgt,
     while (len) {
         /* Get collection(s) */
         char *val = xstrndup(p, len);
+        char *box = dav_drive_box_from_url(val);
+
+        free(val);
+        if (!box) {
+            mbname_free(&mbname);
+            *resultstr = "Collection name is not valid UTF-8";
+            return HTTP_BAD_REQUEST;
+        }
 
         /* only a creation has to be representable: an existing collection
          * may have been made before we checked */
         if (tgt->mbentry
-            && mboxname_policycheck_component(val,
+            && mboxname_policycheck_component(box,
                                               MBOXNAME_POLICY_UNDER_DOMAIN)) {
-            free(val);
+            free(box);
             mbname_free(&mbname);
             *resultstr = "Invalid characters in collection name";
             return HTTP_FORBIDDEN;
         }
 
-        mbname_push_boxes(mbname, val);
-        free(val);
+        mbname_push_boxes(mbname, box);
+        free(box);
 
         /* Keep track of last segment in path */
         last = p;

@@ -48,6 +48,7 @@
 #include "util.h"
 #include "version.h"
 #include "xmalloc.h"
+#include "charset.h"
 #include "xml_support.h"
 #include "xstrlcat.h"
 #include "xstrlcpy.h"
@@ -59,6 +60,9 @@
 #include <errno.h>
 #include <libxml/parser.h>
 #include <libxml/uri.h>
+#include <libxml/xmlstring.h>
+
+static int is_drive_prefix(const char *urlprefix);
 
 static const struct dav_namespace_t {
     const char *href;
@@ -1985,6 +1989,13 @@ int propfind_collectionname(const xmlChar *name, xmlNsPtr ns,
         xmlNodePtr node = xml_add_prop(HTTP_OK, fctx->ns[NS_DAV],
                                        &propstat[PROPSTAT_OK], name, ns, NULL, 0);
         buf_setcstr(&fctx->buf, (p ? p + 1 : fctx->mbentry->name));
+        if (fctx->req_tgt->namespace->id == URL_NS_DRIVE) {
+            /* the mailbox name is modified UTF-7 with '^' for '.' */
+            char *utf8 = dav_drive_box_to_url(buf_cstring(&fctx->buf));
+            buf_setcstr(&fctx->buf, utf8);
+            free(utf8);
+            buf_replace_char(&fctx->buf, '^', '.');
+        }
         xmlAddChild(node, xmlNewCDataBlock(fctx->root->doc,
                                            BAD_CAST buf_cstring(&fctx->buf),
                                            buf_len(&fctx->buf)));
@@ -4506,7 +4517,12 @@ static int move_collection(const mbentry_t *mbentry, void *rock)
         boxes = mbname_boxes(mbname);
         size = strarray_size(boxes);
         for (n = 1; n < size; n++) {
-            buf_appendcstr(&href, strarray_nth(boxes, n));
+            if (is_drive_prefix(mrock->urlprefix)) {
+                char *seg = dav_drive_box_to_url(strarray_nth(boxes, n));
+                buf_appendcstr(&href, seg);
+                free(seg);
+            }
+            else buf_appendcstr(&href, strarray_nth(boxes, n));
             buf_putc(&href, '/');
         }
         mbname_free(&mbname);
@@ -6382,6 +6398,64 @@ static int propfind_by_resources(struct propfind_ctx *fctx)
 }
 
 
+/* DAV drive collection names.
+ *
+ * A URL segment is UTF-8 (after percent-decoding); a mailbox name is IMAP
+ * modified UTF-7.  mboxname_policycheck_component() refuses raw UTF-8 and a
+ * lone '&', so the drive must convert in both directions.  Segments that are already
+ * valid modified UTF-7 and contain '&' (what clients had to send before this
+ * conversion existed) are kept as they are, so existing folders still open.
+ */
+HIDDEN char *dav_drive_box_from_url(const char *segment)
+{
+    charset_t utf8;
+    char *res;
+    const char *p;
+    int ascii = 1;
+
+    for (p = segment; *p; p++) {
+        if ((unsigned char) *p >= 0x80) ascii = 0;
+    }
+
+    if (ascii) {
+        /* plain ASCII, or already modified UTF-7 (legacy workaround) */
+        if (!strchr(segment, '&') ||
+            !mboxname_policycheck_component(segment,
+                                            MBOXNAME_POLICY_UNDER_DOMAIN))
+            return xstrdup(segment);
+    }
+    else if (!xmlCheckUTF8((const unsigned char *) segment)) {
+        return NULL;
+    }
+
+    utf8 = charset_lookupname("utf-8");
+    if (utf8 == CHARSET_UNKNOWN_CHARSET) return NULL;
+    res = charset_to_imaputf7(segment, strlen(segment), utf8, ENCODING_NONE);
+    charset_free(&utf8);
+
+    return res;
+}
+
+HIDDEN char *dav_drive_box_to_url(const char *box)
+{
+    charset_t imaputf7;
+    char *res;
+
+    if (!strchr(box, '&')) return xstrdup(box);
+
+    imaputf7 = charset_lookupname("imap-mailbox-name");
+    if (imaputf7 == CHARSET_UNKNOWN_CHARSET) return xstrdup(box);
+    res = charset_to_utf8cstr(box, strlen(box), imaputf7, ENCODING_NONE);
+    charset_free(&imaputf7);
+
+    return res ? res : xstrdup(box);
+}
+
+static int is_drive_prefix(const char *urlprefix)
+{
+    return namespace_drive.prefix && !strcmp(urlprefix, namespace_drive.prefix);
+}
+
 HIDDEN size_t make_collection_url(struct buf *buf, const char *urlprefix, int haszzzz,
                                   const mbname_t *mbname, const char *userid)
 {
@@ -6420,7 +6494,12 @@ HIDDEN size_t make_collection_url(struct buf *buf, const char *urlprefix, int ha
     boxes = mbname_boxes(mbname);
     size = strarray_size(boxes);
     for (n = 1; n < size; n++) {
-        buf_appendcstr(buf, strarray_nth(boxes, n));
+        if (is_drive_prefix(urlprefix)) {
+            char *seg = dav_drive_box_to_url(strarray_nth(boxes, n));
+            buf_appendcstr(buf, seg);
+            free(seg);
+        }
+        else buf_appendcstr(buf, strarray_nth(boxes, n));
         buf_putc(buf, '/');
     }
 
